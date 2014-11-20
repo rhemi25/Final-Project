@@ -37,16 +37,16 @@ interrupt is used, which happens to be the watchdog on the LPC1768. */
 #define LED0_GPIO_BIT_NUM                       22
 
 /* The tasks to be created. */
-static void vReadADCTask( void *pvParameters );
-static void vPeriodicTask( void *pvParameters );
-static void vHandlerTask( void *pvParameters );
-static void vFormatTask( void *pvParameters );
-static void vPrintTask( void *pvParameters );
-static void vCalculateFreqTask( void *pvParameters );
-static void vTrackFreqTask( void *pvParameters );
-static void vButtonHandlerTask( void *pvParameters );
+static void vReadADC( void *pvParameters );
+//static void vPeriodicTask( void *pvParameters );
+static void vClock( void *pvParameters );
+static void vFormat( void *pvParameters );
+static void vPrint( void *pvParameters );
+static void vCalculate( void *pvParameters );
+static void vTrack( void *pvParameters );
 
-void buttonInterrupt(void);
+
+void ISR_Button(void);
 static int filterADC(int adc_val, int previous);
 
 static void prvSetupSoftwareInterrupt();
@@ -153,22 +153,22 @@ void buttonInterrupt(void) {
 	xSemaphoreGive(xButtonPressSemaphore);
 }
 
-/*-----------------------------------------------------------*/
-/**
- * vPeriodicTask will generate simulate ISR 1ms periodically
- */
-static void vPeriodicTask( void *pvParameters )
+///*-----------------------------------------------------------*/
+///**
+// * vPeriodicTask will generate simulate ISR 1ms periodically
+// */
+//static void vPeriodicTask( void *pvParameters )
+//
+//{
+//	for( ;; )
+//	{
+//		vTaskDelay( 1 / portTICK_RATE_MS );
+//
+//		mainTRIGGER_INTERRUPT();
+//	}
+//}
 
-{
-	for( ;; )
-	{
-		vTaskDelay( 1 / portTICK_RATE_MS );
-
-		mainTRIGGER_INTERRUPT();
-	}
-}
-
-static void vHandlerTask(void *pvParameters )
+static void vClock(void *pvParameters )
 {
 	unsigned int n;
 
@@ -200,7 +200,7 @@ static void vHandlerTask(void *pvParameters )
 	}
 }
 
-static void vReadADCTask( void *pvParameters )
+static void vReadADC( void *pvParameters )
 {
 	unsigned long ul;
 	int count = 0;
@@ -321,15 +321,33 @@ static void vPrintTask (void *pvParameters )
 		printf("Current Frequency: %f\n", temp);
 	}
 }
-static void vCalculateFreqTask(void *pvParameters)
+static void vCalculate(void *pvParameters)
 {
 
 }
-static void vTrackFreqTask(void *pvParameters)
+static void vTrack(void *pvParameters)
 {
+	int tracker = 10;
+
+	xSemaphoreTake( xFreq, 0 );
+		double temp;
+		for( ;; )
+		{
+			//Taking semaphore from vFormatTask
+			xSemaphoreTake( xPrintSemaphore, portMAX_DELAY );
+			//Using mutex to grab data that vFormatTask stored
+			xSemaphoreTake( xMutexData, portMAX_DELAY);
+			{
+				temp = freq;
+			}
+			xSemaphoreGive( xMutexData );
+			//Printing Frequency
+			printf("Current Frequency: %f\n", temp);
+		}
+
 
 }
-static void vButtonHandlerTask(void *pvParameters)
+static void vISR_Button(void *pvParameters)
 {
 	xSemaphoreTake(xButtonPressSemaphore, 0);
 

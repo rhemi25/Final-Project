@@ -1,2 +1,0 @@
-This is just a commit test. Ignore this file. I don't think it will affect
-compiling. If it does, revert :) to previous version.

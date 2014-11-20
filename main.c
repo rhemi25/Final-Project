@@ -1,36 +1,4 @@
 /*
-    FreeRTOS V8.0.1 - Copyright (C) 2014 Real Time Engineers Ltd.
-
-    This file is part of the FreeRTOS distribution.
-
-    FreeRTOS is free software; you can redistribute it and/or modify it under
-    the terms of the GNU General Public License (version 2) as published by the
-    Free Software Foundation AND MODIFIED BY the FreeRTOS exception.
- ***NOTE*** The exception to the GPL is included to allow you to distribute
-    a combined work that includes FreeRTOS without being obliged to provide the
-    source code for proprietary components outside of the FreeRTOS kernel.
-    FreeRTOS is distributed in the hope that it will be useful, but WITHOUT
-    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-    FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-    more details. You should have received a copy of the GNU General Public
-    License and the FreeRTOS license exception along with FreeRTOS; if not it
-    can be viewed here: http://www.freertos.org/a00114.html and also obtained
-    by writing to Richard Barry, contact details for whom are available on the
-    FreeRTOS WEB site.
-
-    1 tab == 4 spaces!
-
-    http://www.FreeRTOS.org - Documentation, latest information, license and
-    contact details.
-
-    http://www.SafeRTOS.com - A version that is certified for use in safety
-    critical systems.
-
-    http://www.OpenRTOS.com - Commercial support, development, porting,
-    licensing and training services.
- */
-
-/*
  * Yeonil Yoo
  * Zack Parker
  * Rich Hemingway
@@ -60,12 +28,6 @@ interrupt is used, which happens to be the watchdog on the LPC1768. */
 /* Macro to clear the same interrupt. */
 #define mainCLEAR_INTERRUPT()	NVIC_ClearPendingIRQ( mainSW_INTERRUPT_ID )
 
-/* The priority of the software interrupt.  The interrupt service routine uses
-an (interrupt safe) FreeRTOS API function, so the priority of the interrupt must
-be equal to or lower than the priority set by
-configMAX_SYSCALL_INTERRUPT_PRIORITY - remembering that on the Cortex-M3 high
-numeric values represent low priority values, which can be confusing as it is
-counter intuitive. */
 #define mainSOFTWARE_INTERRUPT_PRIORITY 		( 5 )
 
 /* Dimensions the buffer into which messages destined for stdout are placed. */
@@ -85,7 +47,7 @@ static void vTrackFreqTask( void *pvParameters );
 static void vButtonHandlerTask( void *pvParameters );
 
 void buttonInterrupt(void);
-static int filterADC(int adc_val);
+static int filterADC(int adc_val, int previous);
 
 static void prvSetupSoftwareInterrupt();
 static void prvSetupHardware(void);
@@ -99,10 +61,9 @@ void vSoftwareInterruptHandler( void );
 
 /* Declare a variable of type xSemaphoreHandle.  This is used to reference the
 semaphore that is used to synchronize a task with an interrupt. */
-xSemaphoreHandle xBinarySemaphore, xReadADCSemaphore, xFilterSemaphore,
-				 xTrackSemaphore, xCaclculateSemaphore, xButtonPressSemaphore,
-				 xMutexFreq, xMutexTime, xMutexReadADC, xMutexSampleRate;
-
+xSemaphoreHandle xBinarySemaphore, xReadADCSemaphore, xReadSemaphore,
+xWriteSemaphore, xCalculateSemaphore, xButtonPressSemaphore,
+xMutexFreq, xMutexTime, xMutexReadADC, xMutexSampleRate;
 /**
  * Queue that used at vHandlerTask and vFormatTask. vHandlerTask will queue ADC value,
  * and vFormatTask will dequeue the ADC value.
@@ -121,20 +82,10 @@ volatile uint32_t rtc_clock_ctr;
  */
 volatile unsigned int filterVal;
 
-/**
- * Real Time value since last button interrupt.
- */
 volatile unsigned int time;
 
-/**
- * Frequency value calculated from latest ADC readings.
- */
 volatile unsigned int currentFreq;
 
-/**
- * ADC Sampling rate determined by the latest frequency readings, adjusted for
- * accuracy, and time and energy savings.
- */
 volatile unsigned int sampleRate;
 
 /*-----------------------------------------------------------*/
@@ -162,49 +113,33 @@ int main( void )
 	LPC_GPIOINT->IO0IntEnR = 1;
 
 	xPrintQueue = xQueueCreate(5, sizeof(char *));
-
-	//Before a semaphore is used it must be explicitly created.
-	xMutexClock = xSemaphoreCreateMutex();
-	xMutexData = xSemaphoreCreateMutex();
-	vSemaphoreCreateBinary( xBinarySemaphore );
-	vSemaphoreCreateBinary( xPrintSemaphore );
-
+	/* Before a semaphore is used it must be explicitly created.  In this example
+    a binary semaphore is created. */
+	xMutexFreq = xSemaphoreCreateMutex();		//
+	xMuteTime = xSemaphoreCreateMutex();		//
+	xMuteReadADC = xSemaphoreCreateMutex();		//
+	xMuteSampleRate = xSemaphoreCreateMutex();	//
+	vSemaphoreCreateBinary( xBinarySemaphore );		//Semaphore for from ISR to Handler
+	vSemaphoreCreateBinary( xReadADCSemaphore );	//Semaphore for Handler to signal to start Read ADC Task
+	vSemaphoreCreateBinary( xCalculateSemaphore );	//Semaphore for ReadADC Task to signal to Calculate from ADC value
+	vSemaphoreCreateBinary( xReadSemaphore );		//Semaphore that Calculate task to flag writing mutex is done and ready to read
+	vSemaphoreCreateBinary( xWriteSemaphore );		//Semaphore that Track task to flag reading Mutex is done and read to write
+	vSemaphoreCreateBinary( xButtonPressSemaphore );//
 	/* Check the semaphore was created successfully. */
 	if( xBinarySemaphore != NULL )
 	{
 		/* Enable the software interrupt and set its priority. */
 		prvSetupSoftwareInterrupt();
 
-		/* Create the 'handler' task.  This is the task that will be synchronized
-        with the interrupt.  The handler task is created with a high priority to
-        ensure it runs immediately after the interrupt exits.  In this case a
-        priority of 3 is chosen. */
-		xTaskCreate( vReadADCTask, "ReadADC", 240, NULL, 3, NULL );
-		xTaskCreate( vPeriodicTask, "ISR", 240, NULL, 0, NULL );
-		xTaskCreate ( vHandlerTask, "Handler", 240, NULL, 3, NULL);
-		xTaskCreate ( vFormatTask, "Format", 240, NULL, 3, NULL);
-		xTaskCreate ( vPrintTask, "Print", 240, NULL, 3, NULL);
-		xTaskCreate ( vCalculateFreqTask, "CalcFreq", 240, NULL, 3, NULL);
-		xTaskCreate ( vTrackFreqTask, "TrackFreq", 240, NULL, 3, NULL);
-		xTaskCreate ( vButtonHandlerTask, "ButtonHandler", 240, NULL, 3, NULL);
-
-
-		/*Create the gatekeeper task. This is the only task that is permitted
-		 * to directly access standard out
-		 */
-		//        xTaskCreate ( prvStdioGateKeeperTask, "GateKeeper", 240, NULL, 3, NULL);
-		/* Create the task that will periodically generate a software interrupt.
-        This is created with a priority below the handler task to ensure it will
-        get preempted each time the handler task exits the Blocked state. */
+		xTaskCreate( vReadADC, "Handler", 240, NULL, 3, NULL );
+		xTaskCreate( vFormatTask, "Format", 240, NULL, 0, NULL );
+		xTaskCreate ( vPrintCurrentFreq, "PrintFreq", 240, NULL, 3, NULL);
 		xTaskCreate( vPeriodicTask, "Periodic", 240, NULL, 1, NULL );
 
 		/* Start the scheduler so the created tasks start executing. */
 		vTaskStartScheduler();
 	}
 
-	/* If all is well we will never reach here as the scheduler will now be
-    running the tasks.  If we do reach here then it is likely that there was
-    insufficient heap memory available for a resource to be created. */
 	for( ;; );
 	return 0;
 }
@@ -215,62 +150,21 @@ void buttonInterrupt(void) {
 	NVIC_ClearPendingIRQ(21);
 	NVIC_DisableIRQ(21);
 	portEND_SWITCHING_ISR(pdFalse);
+	xSemaphoreGive(xButtonPressSemaphore);
 }
+
 /*-----------------------------------------------------------*/
 /**
- * Once vPeriodic task throws interrupt, vHandlerTask catches xBinarySemaphore,
- * read data from ADC and queue, which will be dequeue by vFormatTask
- */
-static void vReadADCTask( void *pvParameters )
-{
-	unsigned long ul;
-	int count = 0;
-	int adc_val;
-	/* As per most tasks, this task is implemented within an infinite loop.
-
-    Take the semaphore once to start with so the semaphore is empty before the
-    infinite loop is entered.  The semaphore was created before the scheduler
-    was started so before this task ran for the first time.*/
-	xSemaphoreTake( xBinarySemaphore, 0 );
-
-	for( ;; )
-	{
-		/* Use the semaphore to wait for the event.  The task blocks
-        indefinitely meaning this function call will only return once the
-        semaphore has been successfully obtained - so there is no need to check
-        the returned value. */
-		xSemaphoreTake( xBinarySemaphore, portMAX_DELAY );
-
-		/* To get here the event must have occurred.  Process the event (in this
-        case we just print out a message). */
-		//vPrintString( "Handler task - Processing event.\n" );
-
-		LPC_ADC->ADCR |= 1 << 24; // start conversion
-		while((LPC_ADC->ADDR0 & (1 << 31)) == 0); // wait for conversion to finish
-		adc_val = (LPC_ADC->ADDR0 >> 4) & 0xfff; // read value
-		xQueueSendToBack(xDataQueue, &adc_val, 0);
-
-		//This print need to be deleted later
-		//printf("%8d : %d\n", count++, adc_val);
-	}
-}
-/*-----------------------------------------------------------*/
-/**
- * vPeriodicTask will generate simulate interrupt periodically
+ * vPeriodicTask will generate simulate ISR 1ms periodically
  */
 static void vPeriodicTask( void *pvParameters )
 
 {
-
-	/* As per most tasks, this task is implemented within an infinite loop. */
 	for( ;; )
 	{
-		/* This task is just used to 'simulate' an interrupt.  This is done by
-        periodically generating a software interrupt. */
 		vTaskDelay( 1 / portTICK_RATE_MS );
 
 		mainTRIGGER_INTERRUPT();
-		//}
 	}
 }
 
@@ -279,36 +173,59 @@ static void vHandlerTask(void *pvParameters )
 	unsigned int n;
 
 	unsigned int countMS = 0;
-
-	/* As per most tasks, this task is implemented within an infinite loop.
-	Take the semaphore once to start with so the semaphore is empty before the
-	infinite loop is entered.  The semaphore was created before the scheduler
-	was started so before this task ran for the first time.*/
 	xSemaphoreTake( xBinarySemaphore, 0 );
 
 	for( ;; )
 	{
 		//Taking semaphore from vFormatTask
 		xSemaphoreTake( xBinarySemaphore, portMAX_DELAY );
-			countMS++;
-			xSemaphoreTake( xMutexTime, portMAX_DELAY);
-			{
-				time = countMS;
-			}
-			xSemaphoreGive( xMutexTime);
+		countMS++;
+		xSemaphoreTake( xMutexTime, portMAX_DELAY);
+		{
+			time = countMS;
+		}
+		xSemaphoreGive( xMutexTime);
 
-			//Using mutex to grab data that vFormatTask stored
-			xSemaphoreTake( xMutexSampleRate, portMAX_DELAY);
-			{
-				n = sampleRate;
-			}
-			xSemaphoreGive( xMutexSampleRate);
+		//Using mutex to grab data that vFormatTask stored
+		xSemaphoreTake( xMutexSampleRate, portMAX_DELAY);
+		{
+			n = sampleRate;
+		}
+		xSemaphoreGive( xMutexSampleRate);
 
-			if(countMS % n == 0)
-			{
-				xSemaphoreGive(xReadADCSemaphore);
-			}
-		xSemaphoreGive( xBinarySemaphore);
+		if(countMS % n == 0)
+		{
+			xSemaphoreGive(xReadADCSemaphore);
+		}
+	}
+}
+
+static void vReadADCTask( void *pvParameters )
+{
+	unsigned long ul;
+	int count = 0;
+	int adc_val;
+	int previous = 0;
+	xSemaphoreTake( xReadADCSemaphore, 0 );
+
+	for( ;; )
+	{
+		xSemaphoreTake( xReadADCSemaphore, portMAX_DELAY );
+
+		LPC_ADC->ADCR |= 1 << 24; // start conversion
+		while((LPC_ADC->ADDR0 & (1 << 31)) == 0); // wait for conversion to finish
+		adc_val = (LPC_ADC->ADDR0 >> 4) & 0xfff; // read value
+		//Filter and store in previous
+		previous = filterADC(adc_valu, previous);
+
+		xSemaphoreTake(xMutexReadADC, portMAX_DELAY);
+		{
+			filterVal = previous;
+		}
+		xSemaphoreGive(xMutexReadADC);
+
+		xSemaphoreGive(xCalculateSemaphore);
+		//printf("%8d : %d\n", count++, adc_val); //For debugging purpose
 	}
 }
 /*-----------------------------------------------------------*/
@@ -414,35 +331,18 @@ static void vTrackFreqTask(void *pvParameters)
 }
 static void vButtonHandlerTask(void *pvParameters)
 {
+	xSemaphoreTake(xButtonPressSemaphore, 0);
 
+	for(;;) {
+		xSemaphoreTake(xButtonPressSemaphore, portMAX_DELAY);
+	}
 }
 
-static int filterADC(int adc_val)
+static int filterADC(int adc_val, int previous)
 {
-	return (adc_val >> 2) + (filterADC-(filterADC >> 2));
+	return (adc_val >> 2) + (previous-(previous>>2));
 }
-//static void prvStdioGateKeeperTask (void *pvParameters)
-//{
-//	char *pcMessageToPrint;
-//
-//	static char cBuffer[mainMAX_MSG_LEN];
-//	xSemaphoreTake( xPrintSemaphore, portMAX_DELAY);
-//
-//		for(;;)
-//		{
-//			xSemaphoreTake( xPrintSemaphore, portMAX_DELAY);
-//			while(uxQueueMessagesWaiting(xPrintQueue) != 0)
-//			{
-//				xQueueReceive( xPrintQueue, &pcMessageToPrint, portMAX_DELAY);
-//				printf("%f", pcMessageToPrint);
-//
-////				sprintf(cBuffer, "%s", pcMessageToPrint);
-////				consoleprint(cBuffer);
-//			}
-//			xSemaphoreGive(xPrintSemaphore);
-//		}
-//
-//}
+
 
 static void prvSetupSoftwareInterrupt()
 {

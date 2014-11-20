@@ -36,65 +36,69 @@ interrupt is used, which happens to be the watchdog on the LPC1768. */
 #define LED0_GPIO_PORT_NUM                      0
 #define LED0_GPIO_BIT_NUM                       22
 
-/* The tasks to be created. */
+//-----------------------------------------------------------------------------------------
+// Software ISR 
+//-----------------------------------------------------------------------------------------
+static void SoftwareISR( void *pvParameters );
+//-----------------------------------------------------------------------------------------
+// The Tasks
+//-----------------------------------------------------------------------------------------
 static void vReadADC( void *pvParameters );
-//static void vPeriodicTask( void *pvParameters );
 static void vClock( void *pvParameters );
-static void vFormat( void *pvParameters );
-static void vPrint( void *pvParameters );
 static void vCalculate( void *pvParameters );
-static void vTrack( void *pvParameters );
-
-
+static void vPrint( void *pvParameters );
+static void vTrackFreq( void *pvParameters );
+//-----------------------------------------------------------------------------------------
+// Button Hardware Interrupt
+//-----------------------------------------------------------------------------------------
 void ISR_Button(void);
+//-----------------------------------------------------------------------------------------
+// Filerts the ADC value
+//-----------------------------------------------------------------------------------------
 static int filterADC(int adc_val, int previous);
-
+//-----------------------------------------------------------------------------------------
+// Configuration of Interrupts
+//-----------------------------------------------------------------------------------------
 static void prvSetupSoftwareInterrupt();
 static void prvSetupHardware(void);
-
-/* The service routine for the interrupt.  This is the interrupt that the
-task will be synchronized with. */
+//The service routine for the interrupt.  This is the interrupt that the
+//task will be synchronized with.
 void vSoftwareInterruptHandler( void );
-
-
-/*-----------------------------------------------------------*/
-
-/* Declare a variable of type xSemaphoreHandle.  This is used to reference the
-semaphore that is used to synchronize a task with an interrupt. */
-xSemaphoreHandle xBinarySemaphore, xReadADCSemaphore, xReadSemaphore,
-xWriteSemaphore, xCalculateSemaphore, xButtonPressSemaphore,
-xMutexFreq, xMutexTime, xMutexReadADC, xMutexSampleRate;
-/**
- * Queue that used at vHandlerTask and vFormatTask. vHandlerTask will queue ADC value,
- * and vFormatTask will dequeue the ADC value.
- */
+//-----------------------------------------------------------------------------------------
+// Semaphores
+//-----------------------------------------------------------------------------------------
+xSemaphoreHandle xBinarySemaphore;
+xReadADCSemaphore; //ISRHandle --> vReadADC
+//vReadADC(P)-->| xMutexFilterADC |-->vCalculate(C)
+xReadADCSemaphorePro, xReadADCSemaphoreCon;
+//vCalculate(P)-->| xMutexFreq |-->vTrackFreq(C)
+xCalTrackSemaphorePro, xCalTrackSemaphoreCon; 
+//vTrackFreq(P)-->| xMutexSampleRate |-->vClock(C)
+xClockTrackSemaphorePro, xClockTrackSemaphoreCon; 
+//vClock(P)-->| xMutexTime |-->vCalculate(C)
+xClockCalSemaphorePro, xClockCalSemaphoreCon; 
+//-----------------------------------------------------------------------------------------
+// Mutexes
+//-----------------------------------------------------------------------------------------
+xMutexFilterADC, xMutexFreq, xMutexSampleRate, xMutexTime;
+//-----------------------------------------------------------------------------------------
+// Queue
+//-----------------------------------------------------------------------------------------
 xQueueHandle xPrintQueue;
-
-/**
- * Clock that will stored by vPeriodicTask using Mutex, and
- * the clock will by used and reset by vFormatTask also by using Mutex
- */
+//-----------------------------------------------------------------------------------------
+// Clock that will stored by vPeriodicTask using Mutex, and
+// the clock will by used and reset by vFormatTask also by using Mutex
+//-----------------------------------------------------------------------------------------
 volatile uint32_t rtc_clock_ctr;
-
-/**
- * Frequency that will be calculated and stored by vFormatTask using Mutex,
- * and vPrintTask will take data by using Mutex also.
- */
-volatile unsigned int filterVal;
-
+//-----------------------------------------------------------------------------------------
+// Frequency that will be calculated and stored by vFormatTask using Mutex,
+// and vPrintTask will take data by using Mutex also.
+//-----------------------------------------------------------------------------------------
+volatile unsigned int filterADC;
 volatile unsigned int time;
-
 volatile unsigned int currentFreq;
-
 volatile unsigned int sampleRate;
 
-/*-----------------------------------------------------------*/
-/* Define the strings that the tasks and interrupt will print out via the gatekeeper. */
-//static char *pcStringToPrint[] =
-//{
-//	"\nCurrent Frequency: ",
-//	"\nFrequency Change: "
-//};
 int main( void )
 {
 
@@ -143,41 +147,26 @@ int main( void )
 	for( ;; );
 	return 0;
 }
+//-----------------------------------------------------------------------------------------
+// SoftwareISR will generate simulate ISR 1ms periodically
+//-----------------------------------------------------------------------------------------
+static void SoftwareISR ( void *pvParameters ) {
+	for( ;; ) {
+		vTaskDelay( 1 / portTICK_RATE_MS );
 
-void buttonInterrupt(void) {
-	printf("Frequency Measured");
-	LPC_GPIOINT->IO0IntClr = 1;
-	NVIC_ClearPendingIRQ(21);
-	NVIC_DisableIRQ(21);
-	portEND_SWITCHING_ISR(pdFalse);
-	xSemaphoreGive(xButtonPressSemaphore);
+		mainTRIGGER_INTERRUPT();
+	}
 }
-
-///*-----------------------------------------------------------*/
-///**
-// * vPeriodicTask will generate simulate ISR 1ms periodically
-// */
-//static void vPeriodicTask( void *pvParameters )
-//
-//{
-//	for( ;; )
-//	{
-//		vTaskDelay( 1 / portTICK_RATE_MS );
-//
-//		mainTRIGGER_INTERRUPT();
-//	}
-//}
-
-static void vClock(void *pvParameters )
-{
+//-----------------------------------------------------------------------------------------
+// vClock is a timer. It also keeps track of the sampling rate.
+//-----------------------------------------------------------------------------------------
+static void vClock(void *pvParameters ) {
 	unsigned int n;
-
 	unsigned int countMS = 0;
-	xSemaphoreTake( xBinarySemaphore, 0 );
+	xSemaphoreTake( xBinarySemaphore, 0 ); //SoftwareISR_Handler gave this semaphore. Clear
 
 	for( ;; )
 	{
-		//Taking semaphore from vFormatTask
 		xSemaphoreTake( xBinarySemaphore, portMAX_DELAY );
 		countMS++;
 		xSemaphoreTake( xMutexTime, portMAX_DELAY);
@@ -193,15 +182,14 @@ static void vClock(void *pvParameters )
 		}
 		xSemaphoreGive( xMutexSampleRate);
 
-		if(countMS % n == 0)
-		{
+		if(countMS % n == 0) 
 			xSemaphoreGive(xReadADCSemaphore);
-		}
 	}
 }
-
-static void vReadADC( void *pvParameters )
-{
+//-----------------------------------------------------------------------------------------
+// vReadADC task reads the ADC raw value, filters it via software implemented filter
+//-----------------------------------------------------------------------------------------
+static void vReadADC( void *pvParameters ) {
 	unsigned long ul;
 	int count = 0;
 	int adc_val;
@@ -220,7 +208,7 @@ static void vReadADC( void *pvParameters )
 
 		xSemaphoreTake(xMutexReadADC, portMAX_DELAY);
 		{
-			filterVal = previous;
+			filterADC = previous;
 		}
 		xSemaphoreGive(xMutexReadADC);
 
@@ -228,15 +216,16 @@ static void vReadADC( void *pvParameters )
 		//printf("%8d : %d\n", count++, adc_val); //For debugging purpose
 	}
 }
-/*-----------------------------------------------------------*/
-/**
- * vFormatTask dequeue the data that vHandlerTask has queued,
- * keeps track of counts when data crosses middle point, and when button is pressed,
- * take time(clock) and reset time using mutex, and calculate the frequency, then store
- * using mutex
- */
-static void vFormatTask( void *pvParameters )
-{
+//-----------------------------------------------------------------------------------------
+// filterADC software implemented filer some of the noise from the signal.
+//-----------------------------------------------------------------------------------------
+static int filterADC(int adc_val, int previous) {
+	return (adc_val >> 2) + (previous-(previous>>2));
+}
+//-----------------------------------------------------------------------------------------
+// vCalculate task reads the ADC raw value, filters it via software implemented filter
+//-----------------------------------------------------------------------------------------
+static void vCalculate(void *pvParameters) {
 	//Max is 4095 or 3915 Min is 0
 	int pcInt;
 	portBASE_TYPE xStatus;
@@ -299,34 +288,8 @@ static void vFormatTask( void *pvParameters )
 		}
 	}
 }
-/**
- * vPrintTask requires vFormatTask to release PrintSemaphore, and take data
- * from vFormatTask stored in globe by using Mutex and print with Mutex.
- */
-static void vPrintTask (void *pvParameters )
-{
-	xSemaphoreTake( xPrintSemaphore, 0 );
-	double temp;
-	for( ;; )
-	{
-		//Taking semaphore from vFormatTask
-		xSemaphoreTake( xPrintSemaphore, portMAX_DELAY );
-		//Using mutex to grab data that vFormatTask stored
-		xSemaphoreTake( xMutexData, portMAX_DELAY);
-		{
-			temp = freq;
-		}
-		xSemaphoreGive( xMutexData );
-		//Printing Frequency
-		printf("Current Frequency: %f\n", temp);
-	}
-}
-static void vCalculate(void *pvParameters)
-{
 
-}
-static void vTrack(void *pvParameters)
-{
+static void vTrackFreq(void *pvParameters) {
 	int tracker = 10;
 
 	xSemaphoreTake( xFreq, 0 );
@@ -347,20 +310,39 @@ static void vTrack(void *pvParameters)
 
 
 }
-static void vISR_Button(void *pvParameters)
-{
-	xSemaphoreTake(xButtonPressSemaphore, 0);
 
-	for(;;) {
-		xSemaphoreTake(xButtonPressSemaphore, portMAX_DELAY);
+void ISR_Button (void) {
+	printf("Frequency Measured"); //Don't forget to enable in main
+	LPC_GPIOINT->IO0IntClr = 1;
+	NVIC_ClearPendingIRQ(21);
+	NVIC_DisableIRQ(21);
+	portEND_SWITCHING_ISR(pdFalse);
+	xSemaphoreGive(xButtonPressSemaphore);
+}
+
+/**
+ * vPrintTask requires vFormatTask to release PrintSemaphore, and take data
+ * from vFormatTask stored in globe by using Mutex and print with Mutex.
+ */
+
+static void vPrintTask (void *pvParameters )
+{
+	xSemaphoreTake( xPrintSemaphore, 0 );
+	double temp;
+	for( ;; )
+	{
+		//Taking semaphore from vFormatTask
+		xSemaphoreTake( xPrintSemaphore, portMAX_DELAY );
+		//Using mutex to grab data that vFormatTask stored
+		xSemaphoreTake( xMutexData, portMAX_DELAY);
+		{
+			temp = freq;
+		}
+		xSemaphoreGive( xMutexData );
+		//Printing Frequency
+		printf("Current Frequency: %f\n", temp);
 	}
 }
-
-static int filterADC(int adc_val, int previous)
-{
-	return (adc_val >> 2) + (previous-(previous>>2));
-}
-
 
 static void prvSetupSoftwareInterrupt()
 {

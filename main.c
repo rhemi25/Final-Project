@@ -1,9 +1,12 @@
-/*
- * Yeonil Yoo
- * Zack Parker
- * Rich Hemingway
- * Antonio Orozco
- */
+//*****************************************************************************
+// 	main.c 
+//
+//	Programmers: Zackory Parker, Rich Hemingway, R. Antonio Orozco, and Yeonil Yoo
+//	Date: 12/01/2014
+//	Purpose: main.c implements a frequency analyzer using freeRTOS. Tasks
+// 	communicate with each other using semaphores.
+//
+//*****************************************************************************
 
 /* FreeRTOS.org includes. */
 #include "FreeRTOS.h"
@@ -53,7 +56,7 @@ static void vPrintTask( void *pvParameters );
 //-----------------------------------------------------------------------------------------
 void ISR_Button(void);
 //-----------------------------------------------------------------------------------------
-// Filerts the ADC value
+// Filters the ADC value
 //-----------------------------------------------------------------------------------------
 static int filteringADC(int adc_val, int previous);
 //-----------------------------------------------------------------------------------------
@@ -170,7 +173,7 @@ int main( void ) {
 	return 0;
 }
 //-----------------------------------------------------------------------------------------
-// SoftwareISR will generate simulate ISR 1ms periodically
+// SoftwareISR will generate simulate ISR 1 ms periodically
 //-----------------------------------------------------------------------------------------
 static void SoftwareISR ( void *pvParameters ) {
 	for( ;; ) {
@@ -254,7 +257,7 @@ static void vReadADC( void *pvParameters ) {
 	}
 }
 //-----------------------------------------------------------------------------------------
-// filterADC software implemented filer some of the noise from the signal.
+// filterADC software implemented filter some of the noise from the signal.
 //-----------------------------------------------------------------------------------------
 static int filteringADC(int adc_val, int previous) {
 	return (adc_val >> 2) + (previous-(previous>>2));
@@ -310,7 +313,11 @@ static void vCalculate(void *pvParameters) {
 		}
 	}
 }
-
+//-----------------------------------------------------------------------------------------
+// vTrackFreq task tracks the current frequency to detect +- 10Hz change of frequency.
+// If frequency changes by a minimum of 10 Hz, then the current frequency gets
+// updated and printed to the console.
+//-----------------------------------------------------------------------------------------
 static void vTrackFreq(void *pvParameters) {
 	unsigned int tracker = 10;
 	double old_freq = 0;
@@ -346,10 +353,12 @@ static void vTrackFreq(void *pvParameters) {
 		xSemaphoreGive( xMutexTime  );
 	}
 }
-//Interrupt handler for button
+//-----------------------------------------------------------------------------------------
+// ISR_Button handler is called whenever a button is pressed
+//-----------------------------------------------------------------------------------------
 void ISR_Button (void) {
 	LPC_GPIOINT->IO0IntClr = 1;
-	//printf("Frequency Measured"); //Don't forget to enable in main
+	//Don't forget to enable in main
 	NVIC_ClearPendingIRQ(21);
 	NVIC_DisableIRQ(21);
 	portEND_SWITCHING_ISR(pdFALSE);
@@ -360,12 +369,10 @@ void ISR_Button (void) {
 	}
 	xSemaphoreGive( xMutexButtonFlag );
 	xSemaphoreGive( xPrintSemaphore ); //Give semaphore for Print Task to print
-	//printf("measure 1");
-
-	//portEND_SWITCHING_ISR(0);
-	//xSemaphoreGive(xButtonPressSemaphore);
 }
-
+//-----------------------------------------------------------------------------------------
+// vPrintTask task prints the frequency and the time.
+//-----------------------------------------------------------------------------------------
 static void vPrintTask (void *pvParameters ) {
 	double freq;
 	unsigned int localtime;
@@ -420,7 +427,8 @@ static void vPrintTask (void *pvParameters ) {
 			 * multiple time while we intend for only a single interrupt. Throughout code, there are multiple commented
 			 * NVIC_EnableIRQ because we were trying to figure out where will be best to re-enable.
 			 */
-			NVIC_EnableIRQ(21);
+			NVIC_EnableIRQ(21); //need to enable since its disable inside the handler
+								//gets rid of de-bouncing
 		}
 		if(localbuttonflag == 1) {
 			//NVIC_EnableIRQ(21);

@@ -12,6 +12,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
+#include "event_groups.h"
 
 
 /* Demo includes. */
@@ -38,7 +39,9 @@ interrupt is used, which happens to be the watchdog on the LPC1768. */
 
 #define LED0_GPIO_PORT_NUM                      0
 #define LED0_GPIO_BIT_NUM                       22
-
+#define TIME_BIT_0 								(1 << 0);		//Time Bit in Event Group
+#define FREQ_BIT_4 								(1 << 4);		//Freq Bit in Event Group
+#define BUTTON_BIT_8 							(1 << 8);		//Button Bit in Event Group
 //-----------------------------------------------------------------------------------------
 // Software ISR
 //-----------------------------------------------------------------------------------------
@@ -51,6 +54,7 @@ static void vReadADC( void *pvParameters );
 static void vCalculate( void *pvParameters );
 static void vTrackFreq( void *pvParameters );
 static void vPrintTask( void *pvParameters );
+static void vEventGroupPrinter( void *pvParameters);
 //-----------------------------------------------------------------------------------------
 // Button Hardware Interrupt
 //-----------------------------------------------------------------------------------------
@@ -89,11 +93,12 @@ xSemaphoreHandle xPrintSemaphore;
 //-----------------------------------------------------------------------------------------
 xSemaphoreHandle xMutexFilterADC, xMutexFreq, xMutexSampleRate, xMutexTime;
 xSemaphoreHandle xMutexPrintTime, xMutexPrintFreq;
-xSemaphoreHandle xMutexTimeFlag, xMutexButtonFlag, xMutexTrackFlag;
+//xSemaphoreHandle xMutexTimeFlag, xMutexButtonFlag, xMutexTrackFlag;
+
 //-----------------------------------------------------------------------------------------
-// Queue
+// EventGroup
 //-----------------------------------------------------------------------------------------
-//xQueueHandle xPrintQueue;
+EventGroupHandle_t xEventGroupPrint(void);
 //-----------------------------------------------------------------------------------------
 // Clock that will stored by vPeriodicTask using Mutex, and
 // the clock will by used and reset by vFormatTask also by using Mutex
@@ -138,13 +143,18 @@ int main( void ) {
 	xMutexTime = xSemaphoreCreateMutex();		//
 	xMutexSampleRate = xSemaphoreCreateMutex();	//
 	xMutexFilterADC = xSemaphoreCreateMutex();	//
+	
 	//Flag mutex for print
-	xMutexTimeFlag = xSemaphoreCreateMutex();
-	xMutexButtonFlag = xSemaphoreCreateMutex();
-	xMutexTrackFlag = xSemaphoreCreateMutex();
-	//Data mutex for pint
+	// xMutexTimeFlag = xSemaphoreCreateMutex();
+// 	xMutexButtonFlag = xSemaphoreCreateMutex();
+// 	xMutexTrackFlag = xSemaphoreCreateMutex();
+	
+	//Data mutex for print
 	xMutexPrintTime = xSemaphoreCreateMutex();
 	xMutexPrintFreq = xSemaphoreCreateMutex();
+	
+	//Event Group used in printing
+	xEventGroupPrint = xEventGroupCreate();
 
 	vSemaphoreCreateBinary( xBinarySemaphore );		//Semaphore for from ISR to Handler
 	vSemaphoreCreateBinary( xReadADCSemaphore );
@@ -206,18 +216,18 @@ static void vClock(void *pvParameters ) {
 		//Every second, set flag high to signal Print Task to print
 		if(countMS % 1000 == 0) {
 			//NVIC_EnableIRQ(21);
-			xSemaphoreTake( xMutexTimeFlag, portMAX_DELAY);
-			{
-				timeFlag = 1;
-			}
-			xSemaphoreGive( xMutexTimeFlag );
+			// xSemaphoreTake( xMutexTimeFlag, portMAX_DELAY);
+// 			{
+// 				//timeFlag = 1;
+// 			}
+// 			xSemaphoreGive( xMutexTimeFlag );
 
 			xSemaphoreTake( xMutexPrintTime, portMAX_DELAY);
 			{
 				printTime = countMS;
 			}
 			xSemaphoreGive( xMutexPrintTime );
-
+			xEventGroupSetBits(xEventGroupPrinter, TIME_BIT_0);		//SET TIME BIT IN EVENT GROUP
 			xSemaphoreGive( xPrintSemaphore );	//Give Semaphore to Print Task
 		}
 		//Give Semaphore to read ADC every sample rate
@@ -336,11 +346,13 @@ static void vTrackFreq(void *pvParameters) {
 
 		if(current_freq - old_freq > 10 || old_freq -  current_freq> 10) {	//checking if frequency is changed more than 10
 			//printf("Changed Freq: %f", current_freq);//debugging purpose
-			xSemaphoreTake( xMutexTrackFlag, portMAX_DELAY);
-			{
-				trackFlag = 1;	//Set high on flag for Print
-			}
-			xSemaphoreGive( xMutexTrackFlag );
+			xEventGroupSetBits(xEventGroupPrinter, FREQ_BIT_4);
+			// xSemaphoreTake( xMutexTrackFlag, portMAX_DELAY);
+// 			{
+// 				//trackFlag = 1;	//Set high on flag for Print
+//
+// 			}
+// 			xSemaphoreGive( xMutexTrackFlag );
 			xSemaphoreGive( xPrintSemaphore ); //Give semaphore to Print
 			//keep tracking freq
 			old_freq = current_freq; //Store current frequecny to current frequecny
@@ -362,12 +374,15 @@ void ISR_Button (void) {
 	NVIC_ClearPendingIRQ(21);
 	NVIC_DisableIRQ(21);
 	portEND_SWITCHING_ISR(pdFALSE);
-
-	xSemaphoreTake( xMutexButtonFlag, portMAX_DELAY);
-	{
-		buttonFlag = 1;	//Set flag high for Print Task
-	}
-	xSemaphoreGive( xMutexButtonFlag );
+	
+	// xSemaphoreTake( xMutexButtonFlag, portMAX_DELAY);
+// 	{
+// 		//buttonFlag = 1;	//Set flag high for Print Task
+//
+// 	}
+//
+// 	xSemaphoreGive( xMutexButtonFlag );
+	xEventGroupSetBits(xEventGroupPrinter, BUTTON_BIT_8);
 	xSemaphoreGive( xPrintSemaphore ); //Give semaphore for Print Task to print
 }
 //-----------------------------------------------------------------------------------------
@@ -379,46 +394,29 @@ static void vPrintTask (void *pvParameters ) {
 	unsigned int sec;
 	unsigned int min;
 	unsigned int hr;
-	unsigned int localtimeflag;
-	unsigned int localtrackflag;
-	unsigned int localbuttonflag;
+	
+	Event_Bits_t uxBits;
 
 	for( ;; )
 	{
 		xSemaphoreTake( xPrintSemaphore, portMAX_DELAY );
-		//Grabbing all the flag and setting to zero
-		xSemaphoreTake( xMutexTimeFlag, portMAX_DELAY);
-		{
-			localtimeflag = timeFlag;
-			timeFlag = 0;
-		}
-		xSemaphoreGive( xMutexTimeFlag );
-		xSemaphoreTake( xMutexTrackFlag, portMAX_DELAY);
-		{
-			localtrackflag = trackFlag;
-			trackFlag = 0;
-		}
-		xSemaphoreGive( xMutexTrackFlag );
-		xSemaphoreTake( xMutexButtonFlag, portMAX_DELAY);
-		{
-			localbuttonflag = buttonFlag;
-			buttonFlag = 0;
-		}
-		xSemaphoreGive( xMutexButtonFlag );
-		//printf("\nvPrintTask %d %d %d", localtimeflag, localtrackflag, localbuttonflag);
-		if(localtimeflag == 1) {	//if time flag is high, print time
+		
+
+		uxBits = xEventGroupClearBits(xEventGroupPrinter, TIME_BIT_0 | FREQ_BIT_4 | BUTTON_BIT_8); //clear all bits
+		
+		if(( uxBits & TIME_BIT_0) != 0) {
 			xSemaphoreTake( xMutexPrintTime, portMAX_DELAY);
 			{
 				localtime = printTime;	//grabing time
 			}
 			xSemaphoreGive( xMutexPrintTime );
+			
 			//calculating time
 			localtime = localtime / 1000;
 			min = localtime / 60;
 			sec = localtime % 60;
 			hr = min / 60;
 			min = min % 60;
-			//vPrintString(hr + ":" + "min" + ":" + sec);
 			//print time
 			printf("\n%d:%d:%d  ", hr, min, sec);
 			/*
@@ -430,28 +428,114 @@ static void vPrintTask (void *pvParameters ) {
 			NVIC_EnableIRQ(21); //need to enable since its disable inside the handler
 								//gets rid of de-bouncing
 		}
-		if(localbuttonflag == 1) {
-			//NVIC_EnableIRQ(21);
+		if(( uxBits & FREQ_BIT_4) != 0) {
 			xSemaphoreTake( xMutexPrintFreq , portMAX_DELAY);
 			{
 				freq = printFreq; //grab frequency
 			}
 			xSemaphoreGive( xMutexPrintFreq  );
-			//vPrintString("Current frequency: " + freq);
-			printf("Current frequency: %f  ", freq);
-		}
-		if(localtrackflag  == 1) {
-			xSemaphoreTake( xMutexPrintFreq , portMAX_DELAY);
-			{
-				freq = printFreq; //grab frequency
-			}
-			xSemaphoreGive( xMutexPrintFreq  );
-			//vPrintString("Frequency change: " + freq);
 			printf("Frequency change: %f  ", freq);
+		}
+		
+		if(( uxBits & BUTTON_BIT_8) != 0) {
+			xSemaphoreTake( xMutexPrintFreq , portMAX_DELAY);
+			{
+				freq = printFreq; //grab frequency
+			}
+			xSemaphoreGive( xMutexPrintFreq  );
+			printf("Current frequency: %f  ", freq);
 		}
 	}
 }
+// //-----------------------------------------------------------------------------------------
+// // vPrintTask task prints the frequency and the time.
+// //-----------------------------------------------------------------------------------------
+// static void vPrintTask (void *pvParameters ) {
+// 	double freq;
+// 	unsigned int localtime;
+// 	unsigned int sec;
+// 	unsigned int min;
+// 	unsigned int hr;
+// 	unsigned int localtimeflag;
+// 	unsigned int localtrackflag;
+// 	unsigned int localbuttonflag;
+//
+// 	for( ;; )
+// 	{
+// 		xSemaphoreTake( xPrintSemaphore, portMAX_DELAY );
+// 		//Grabbing all the flag and setting to zero
+// 		xSemaphoreTake( xMutexTimeFlag, portMAX_DELAY);
+// 		{
+// 			localtimeflag = timeFlag;
+// 			timeFlag = 0;
+// 		}
+// 		xSemaphoreGive( xMutexTimeFlag );
+// 		xSemaphoreTake( xMutexTrackFlag, portMAX_DELAY);
+// 		{
+// 			localtrackflag = trackFlag;
+// 			trackFlag = 0;
+// 		}
+// 		xSemaphoreGive( xMutexTrackFlag );
+// 		xSemaphoreTake( xMutexButtonFlag, portMAX_DELAY);
+// 		{
+// 			localbuttonflag = buttonFlag;
+// 			buttonFlag = 0;
+// 		}
+// 		xSemaphoreGive( xMutexButtonFlag );
+// 		//printf("\nvPrintTask %d %d %d", localtimeflag, localtrackflag, localbuttonflag);
+// 		if(localtimeflag == 1) {	//if time flag is high, print time
+// 			xSemaphoreTake( xMutexPrintTime, portMAX_DELAY);
+// 			{
+// 				localtime = printTime;	//grabing time
+// 			}
+// 			xSemaphoreGive( xMutexPrintTime );
+// 			//calculating time
+// 			localtime = localtime / 1000;
+// 			min = localtime / 60;
+// 			sec = localtime % 60;
+// 			hr = min / 60;
+// 			min = min % 60;
+// 			//vPrintString(hr + ":" + "min" + ":" + sec);
+// 			//print time
+// 			printf("\n%d:%d:%d  ", hr, min, sec);
+// 			/*
+// 			 * NVIC_EnableIRQ(21) enables button, which it automatically disabled when button is pressed
+// 			 * (Inside ISR_Button, there is NVIC_DisableIRQ(21);) this is to handle button interrupt is being caused
+// 			 * multiple time while we intend for only a single interrupt. Throughout code, there are multiple commented
+// 			 * NVIC_EnableIRQ because we were trying to figure out where will be best to re-enable.
+// 			 */
+// 			NVIC_EnableIRQ(21); //need to enable since its disable inside the handler
+// 								//gets rid of de-bouncing
+// 		}
+// 		if(localbuttonflag == 1) {
+// 			//NVIC_EnableIRQ(21);
+// 			xSemaphoreTake( xMutexPrintFreq , portMAX_DELAY);
+// 			{
+// 				freq = printFreq; //grab frequency
+// 			}
+// 			xSemaphoreGive( xMutexPrintFreq  );
+// 			//vPrintString("Current frequency: " + freq);
+// 			printf("Current frequency: %f  ", freq);
+// 		}
+// 		if(localtrackflag  == 1) {
+// 			xSemaphoreTake( xMutexPrintFreq , portMAX_DELAY);
+// 			{
+// 				freq = printFreq; //grab frequency
+// 			}
+// 			xSemaphoreGive( xMutexPrintFreq  );
+// 			//vPrintString("Frequency change: " + freq);
+// 			printf("Frequency change: %f  ", freq);
+// 		}
+// 	}
+// }
 
+
+static void vEventGroupPrinter(void *pvParameters) {
+	
+	
+}
+
+static void 
 static void prvSetupSoftwareInterrupt()	{
 	/* The interrupt service routine uses an (interrupt safe) FreeRTOS API
 	function so the interrupt priority must be at or below the priority defined

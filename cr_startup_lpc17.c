@@ -194,7 +194,7 @@ void (* const g_pfnVectors[])(void) = {
 	EINT0_IRQHandler,						// 34, 0x88 - EINT0
 	EINT1_IRQHandler,						// 35, 0x8c - EINT1
 	EINT2_IRQHandler,						// 36, 0x90 - EINT2
-	ISR_Button,						// 37, 0x94 - EINT3
+	ISR_Button,								// 37, 0x94 - EINT3
 	ADC_IRQHandler,							// 38, 0x98 - ADC
 	BOD_IRQHandler,							// 39, 0x9c - BOD
 	USB_IRQHandler,							// 40, 0xA0 - USB
